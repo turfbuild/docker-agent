@@ -41,12 +41,13 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 	}
 
 	d := &toolexec.Dispatcher{
-		Tracer:      r.tracer,
-		Hooks:       &hookDispatcher{r: r, events: events},
-		Resume:      r.resumeChan,
-		AgentFor:    r.resolveSessionAgent,
-		Permissions: r.permissionCheckers,
-		Handlers:    handlers,
+		Tracer:              r.tracer,
+		Hooks:               &hookDispatcher{r: r, events: events},
+		Resume:              r.resumeChan,
+		AgentFor:            r.resolveSessionAgent,
+		Permissions:         r.permissionCheckers,
+		Handlers:            handlers,
+		SequentialToolCalls: r.sequentialToolCalls,
 		Recall: func(ctx context.Context, _ *session.Session, _ *agent.Agent, message string) error {
 			return r.recall(ctx, QueuedMessage{Content: message})
 		},
