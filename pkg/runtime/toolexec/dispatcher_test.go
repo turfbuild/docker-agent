@@ -192,6 +192,76 @@ func TestDispatcher_RunsToolHandlersInParallel(t *testing.T) {
 	require.Len(t, em.responses, 2)
 }
 
+func TestDispatcher_SequentialToolCallsRunInEmissionOrder(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+	sess.ToolsApproved = true
+
+	var mu sync.Mutex
+	var events []string
+	firstStarted := make(chan struct{})
+	release := make(chan struct{})
+	tool := tools.Tool{
+		Name: "stateful",
+		Handler: func(ctx context.Context, tc tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+			mu.Lock()
+			events = append(events, "start "+tc.ID)
+			mu.Unlock()
+			if tc.ID == "a" {
+				close(firstStarted)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			mu.Lock()
+			events = append(events, "end "+tc.ID)
+			mu.Unlock()
+			return tools.ResultSuccess("done " + tc.ID), nil
+		},
+	}
+
+	d := &toolexec.Dispatcher{
+		AgentFor:            func(*session.Session) *agent.Agent { return a },
+		SequentialToolCalls: true,
+	}
+	em := &captureEmitter{}
+	done := make(chan struct{})
+	go func() {
+		d.Process(t.Context(), sess, []tools.ToolCall{
+			{ID: "a", Function: tools.FunctionCall{Name: "stateful", Arguments: `{}`}},
+			{ID: "b", Function: tools.FunctionCall{Name: "stateful", Arguments: `{}`}},
+		}, []tools.Tool{tool}, em)
+		close(done)
+	}()
+
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first tool handler to start")
+	}
+	// Grace window: a parallel dispatcher would start "b" here while "a" is
+	// blocked; a sequential one must not touch "b" until "a" returns.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	assert.Equal(t, []string{"start a"}, events)
+	mu.Unlock()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Process to finish")
+	}
+
+	assert.Equal(t, []string{"start a", "end a", "start b", "end b"}, events)
+	require.Len(t, em.responses, 2)
+	assert.Equal(t, "a", em.responses[0].ToolCallID)
+	assert.Equal(t, "b", em.responses[1].ToolCallID)
+}
+
 func TestDispatcher_EmitsToolOutputFromHandlerContext(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
