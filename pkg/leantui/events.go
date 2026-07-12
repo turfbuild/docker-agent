@@ -62,6 +62,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			tool:     toolDef.Name,
 			toolView: *newToolView(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusConfirmation),
 		}
+	case *runtime.ElicitationRequestEvent:
+		m.handleElicitationRequest(ctx, e)
 	case *runtime.TokenUsageEvent:
 		m.setTokenUsage(e.SessionID, e.Usage)
 	case *runtime.AgentInfoEvent:
@@ -96,6 +98,42 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.ModelFallbackEvent:
 		m.addNotice("⚠ ", "Model "+e.FailedModel+" failed, falling back to "+e.FallbackModel+".", stWarning())
 	}
+}
+
+// handleElicitationRequest surfaces an MCP elicitation (e.g. cagent's
+// user_prompt tool, which the turf /up and /destroy flows use to seek plan
+// approval). The lean TUI treats it as a yes/no confirmation: the message is
+// written to the transcript so long plan text scrolls with history, and a
+// compact prompt (see elicitState) collects the answer. URL/OAuth-mode
+// elicitations don't arise in the up/destroy flows lean drives, so they are
+// declined rather than left hanging.
+func (m *model) handleElicitationRequest(ctx context.Context, e *runtime.ElicitationRequestEvent) {
+	if e.Mode == "url" || isOAuthElicitation(e.Meta) {
+		m.addNotice("⚠ ", "Skipping unsupported prompt in lean mode.", stWarning())
+		_ = m.app.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil)
+		return
+	}
+
+	m.transcript.flushPending()
+	if e.Message != "" {
+		m.addNotice("", e.Message, stAccent())
+	}
+	m.elicit = &elicitState{title: elicitationTitle(e.Meta)}
+}
+
+// elicitationTitle reads the dialog title an elicitation may carry in its meta,
+// matching cagent's user_prompt convention (key "cagent/title"), defaulting to
+// "Question" as the full TUI does.
+func elicitationTitle(meta map[string]any) string {
+	if t, ok := meta["cagent/title"].(string); ok && t != "" {
+		return t
+	}
+	return "Question"
+}
+
+func isOAuthElicitation(meta map[string]any) bool {
+	t, ok := meta["docker-agent/type"].(string)
+	return ok && t == "oauth_flow"
 }
 
 func (m *model) handleUserMessageEvent(e *runtime.UserMessageEvent) {

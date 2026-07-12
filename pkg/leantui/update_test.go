@@ -26,6 +26,10 @@ type cycleThinkingRuntime struct {
 	setLevel   effort.Level
 	steered    []runtime.QueuedMessage
 	steerErr   error
+
+	elicitCalls   int
+	elicitAction  tools.ElicitationAction
+	elicitContent map[string]any
 }
 
 func (r *cycleThinkingRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
@@ -55,7 +59,10 @@ func (r *cycleThinkingRuntime) Run(context.Context, *session.Session) ([]session
 	return nil, nil
 }
 func (r *cycleThinkingRuntime) Resume(context.Context, runtime.ResumeRequest) {}
-func (r *cycleThinkingRuntime) ResumeElicitation(context.Context, tools.ElicitationAction, map[string]any) error {
+func (r *cycleThinkingRuntime) ResumeElicitation(_ context.Context, action tools.ElicitationAction, content map[string]any) error {
+	r.elicitCalls++
+	r.elicitAction = action
+	r.elicitContent = content
 	return nil
 }
 func (r *cycleThinkingRuntime) SessionStore() session.Store { return nil }
@@ -172,6 +179,73 @@ func TestEffortCommandRejectsUnknownLevel(t *testing.T) {
 	assert.Zero(t, rt.setCalls)
 	assert.Empty(t, m.status.thinking)
 	assert.Len(t, m.transcript.blocks, 1)
+}
+
+func TestElicitationPromptAcceptsWithY(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	ev := runtime.ElicitationRequest("Approve plan?", "form", nil, "", "eid", nil, "coder")
+	m.handleEvent(t.Context(), ev)
+
+	// The prompt is active and the message was written to the transcript.
+	if assert.NotNil(t, m.elicit) {
+		assert.Equal(t, "Question", m.elicit.title)
+	}
+	joined := strings.Join(m.transcript.lines(80, 0, false, m.sessionState, nil), "\n")
+	assert.Contains(t, joined, "Approve plan?")
+
+	m.handleKey(t.Context(), key{typ: keyRune, runes: []rune{'y'}})
+
+	assert.Equal(t, 1, rt.elicitCalls)
+	assert.Equal(t, tools.ElicitationActionAccept, rt.elicitAction)
+	assert.Equal(t, map[string]any{"response": "yes"}, rt.elicitContent)
+	assert.Nil(t, m.elicit)
+}
+
+func TestElicitationPromptDeclinesWithN(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	m.handleEvent(t.Context(), runtime.ElicitationRequest("Approve plan?", "form", nil, "", "eid", nil, "coder"))
+	m.handleKey(t.Context(), key{typ: keyRune, runes: []rune{'n'}})
+
+	assert.Equal(t, 1, rt.elicitCalls)
+	assert.Equal(t, tools.ElicitationActionDecline, rt.elicitAction)
+	assert.Nil(t, rt.elicitContent)
+	assert.Nil(t, m.elicit)
+}
+
+func TestElicitationTitleFromMeta(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	meta := map[string]any{"cagent/title": "Approve deployment"}
+	m.handleEvent(t.Context(), runtime.ElicitationRequest("msg", "form", nil, "", "eid", meta, "coder"))
+
+	if assert.NotNil(t, m.elicit) {
+		assert.Equal(t, "Approve deployment", m.elicit.title)
+	}
+}
+
+func TestOAuthElicitationDeclinedInLeanMode(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	meta := map[string]any{"docker-agent/type": "oauth_flow"}
+	m.handleEvent(t.Context(), runtime.ElicitationRequest("Authorize", "url", nil, "https://example.com", "eid", meta, "coder"))
+
+	assert.Nil(t, m.elicit) // no interactive prompt; declined immediately
+	assert.Equal(t, 1, rt.elicitCalls)
+	assert.Equal(t, tools.ElicitationActionDecline, rt.elicitAction)
 }
 
 func TestEditorSubmitWhileBusySteersAndRendersAtStreamEnd(t *testing.T) {

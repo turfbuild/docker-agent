@@ -164,6 +164,7 @@ type model struct {
 	ignoredUsers []string
 
 	confirm *confirmState
+	elicit  *elicitState
 
 	quitting         bool
 	appName          string

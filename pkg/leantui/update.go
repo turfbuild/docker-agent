@@ -11,10 +11,15 @@ import (
 
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 func (m *model) handleKey(ctx context.Context, k key) {
+	if m.elicit != nil {
+		m.handleElicitKey(ctx, k)
+		return
+	}
 	if m.confirm != nil {
 		m.handleConfirmKey(k)
 		return
@@ -386,6 +391,33 @@ func (m *model) handleConfirmKey(k key) {
 func (m *model) resolveConfirm(req runtime.ResumeRequest) {
 	m.app.Resume(req)
 	m.confirm = nil
+}
+
+// handleElicitKey answers a pending elicitation prompt as a yes/no. The turf
+// up/destroy flows gate on the response Action, not its content shape, so accept
+// carries a minimal affirmative payload (mirroring the headless autoconfirm
+// path); decline/cancel send no content.
+func (m *model) handleElicitKey(ctx context.Context, k key) {
+	switch {
+	case k.typ == keyEnter:
+		m.resolveElicit(ctx, tools.ElicitationActionAccept, map[string]any{"response": "yes"})
+	case k.typ == keyEsc:
+		m.resolveElicit(ctx, tools.ElicitationActionCancel, nil)
+	case k.typ == keyRune && len(k.runes) > 0:
+		switch k.runes[0] {
+		case 'y', 'Y':
+			m.resolveElicit(ctx, tools.ElicitationActionAccept, map[string]any{"response": "yes"})
+		case 'n', 'N':
+			m.resolveElicit(ctx, tools.ElicitationActionDecline, nil)
+		}
+	}
+}
+
+func (m *model) resolveElicit(ctx context.Context, action tools.ElicitationAction, content map[string]any) {
+	if err := m.app.ResumeElicitation(ctx, action, content); err != nil {
+		m.addNotice("✗ ", fmt.Sprintf("Failed to answer prompt: %v", err), stError())
+	}
+	m.elicit = nil
 }
 
 func (m *model) resetConversation() {
