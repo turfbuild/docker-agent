@@ -563,6 +563,7 @@ func ConvertParametersToSchema(params any) (*genai.Schema, error) {
 		return nil, err
 	}
 
+	normalizeBooleanSchemas(m)
 	normalizeTypeFields(m)
 	normalizeEnumValues(m)
 
@@ -572,6 +573,60 @@ func ConvertParametersToSchema(params any) (*genai.Schema, error) {
 	}
 
 	return schema, nil
+}
+
+// normalizeBooleanSchemas recursively replaces JSON Schema boolean sub-schemas
+// with their object-form equivalent. JSON Schema (draft 2020-12) allows any
+// sub-schema position — a "properties" value, "items", an "anyOf" entry, etc. —
+// to be a bare boolean: true means "any value validates", false means "nothing
+// validates". Gemini's Schema type (an OpenAPI 3.0 subset) has no such form:
+// genai unmarshals every sub-schema into a *genai.Schema object and hard-fails
+// on a JSON boolean ("cannot unmarshal bool into Go struct field
+// Schema.properties of type genai.Schema").
+//
+// Go `any`/interface{} fields are the common source. mcp-go >= v0.46 generates
+// tool input schemas with google/jsonschema-go, which renders an unconstrained
+// (interface{}) field as the boolean `true` schema; earlier versions (invopop)
+// emitted the equivalent empty object {}. Coercing `true` back to {} preserves
+// "any value" while staying parseable by Gemini. `additionalProperties` booleans
+// are left untouched — genai has no such field and ignores the keyword.
+func normalizeBooleanSchemas(m map[string]any) {
+	// Keywords whose value is a map of sub-schemas.
+	for _, key := range []string{"properties", "patternProperties", "$defs", "definitions"} {
+		if sub, ok := m[key].(map[string]any); ok {
+			for name, v := range sub {
+				sub[name] = coerceBooleanSchema(v)
+			}
+		}
+	}
+	// Keywords whose value is a list of sub-schemas.
+	for _, key := range []string{"allOf", "anyOf", "oneOf", "prefixItems"} {
+		if arr, ok := m[key].([]any); ok {
+			for i, v := range arr {
+				arr[i] = coerceBooleanSchema(v)
+			}
+		}
+	}
+	// Keywords whose value is a single sub-schema.
+	for _, key := range []string{"items", "not", "if", "then", "else", "contains", "propertyNames"} {
+		if v, ok := m[key]; ok {
+			m[key] = coerceBooleanSchema(v)
+		}
+	}
+}
+
+// coerceBooleanSchema turns a boolean JSON-Schema node into an empty object
+// schema ({}) and recurses into object nodes. A `false` schema (nothing
+// validates) has no Gemini equivalent and is not meaningful for a tool input
+// parameter, so it is also mapped to {} rather than dropped.
+func coerceBooleanSchema(v any) any {
+	if _, ok := v.(bool); ok {
+		return map[string]any{}
+	}
+	if sub, ok := v.(map[string]any); ok {
+		normalizeBooleanSchemas(sub)
+	}
+	return v
 }
 
 // normalizeTypeFields recursively converts type arrays to single string values.
