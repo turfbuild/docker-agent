@@ -1343,8 +1343,14 @@ func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 	// If the current session is empty (no messages, no title — the default state
 	// when opening the TUI or creating a new tab), replace it in-place instead of
 	// spawning yet another tab.
+	//
+	// Single-session embedders run without a session spawner, so there are
+	// no tabs to spawn into — loading must always replace the current
+	// session in place, or it would fail with "session spawning is not
+	// available". The current session is already persisted to the store, so
+	// replacing it loses nothing (it remains browsable via /sessions).
 	currentSess := m.application.Session()
-	if len(currentSess.Messages) == 0 && currentSess.Title == "" {
+	if (len(currentSess.Messages) == 0 && currentSess.Title == "") || m.supervisor.Spawner() == nil {
 		activeID := m.supervisor.ActiveID()
 		oldPersistedID := m.persistedSessionID(activeID)
 

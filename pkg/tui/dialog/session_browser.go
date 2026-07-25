@@ -149,10 +149,14 @@ func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Di
 	ti.CharLimit = 100
 	ti.SetWidth(50)
 
-	// Filter out empty sessions (sessions without a title)
+	// Filter out empty sessions. Key on message count, not title: a session with
+	// real content but no title (an embedder that configures no title-generation
+	// model never auto-titles its sessions) must still show
+	// — it renders as "Untitled". Using Title != "" here silently hid every such
+	// session, making the browser look empty even though sessions existed.
 	nonEmptySessions := make([]session.Summary, 0, len(sessions))
 	for _, s := range sessions {
-		if s.Title != "" {
+		if s.NumMessages > 0 || s.Title != "" {
 			nonEmptySessions = append(nonEmptySessions, s)
 		}
 	}
