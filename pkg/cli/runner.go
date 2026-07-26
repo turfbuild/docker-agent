@@ -267,6 +267,18 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		return nil
 	}
 
+	// terminateOutput closes the final streamed line with a newline for the
+	// non-interactive (one-shot) paths. The streaming loop prints assistant
+	// content via out.Print (no trailing newline), so without this stdout ends
+	// mid-line and shells such as zsh show a stray "%" end-of-line marker. JSON
+	// mode already newline-terminates every event, so skip it there. The
+	// interactive prompt loop handles its own inter-turn spacing and is excluded.
+	terminateOutput := func() {
+		if !cfg.OutputJSON {
+			out.Println()
+		}
+	}
+
 	switch {
 	case len(userMessages) == 1 && userMessages[0] == "-":
 		// Single "-" argument: read from stdin
@@ -278,6 +290,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		if err := oneLoop(string(buf), os.Stdin); err != nil {
 			return err
 		}
+		terminateOutput()
 	case len(userMessages) > 0:
 		// One or more messages: multi-turn conversation
 		for _, msg := range userMessages {
@@ -285,6 +298,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				return err
 			}
 		}
+		terminateOutput()
 	case !isatty.IsTerminal(os.Stdin.Fd()):
 		// Stdin is not a terminal: read all input from stdin
 		buf, err := io.ReadAll(os.Stdin)
@@ -295,6 +309,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		if err := oneLoop(string(buf), os.Stdin); err != nil {
 			return err
 		}
+		terminateOutput()
 	default:
 		// No messages: interactive prompt loop
 		out.PrintWelcomeMessage(cfg.AppName)
