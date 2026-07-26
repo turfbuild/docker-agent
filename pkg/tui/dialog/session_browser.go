@@ -129,6 +129,11 @@ type sessionBrowserDialog struct {
 	workspace       *workspaceMatcher
 	workspaceDir    string // raw directory the browser was opened from, for display
 	workspaceFilter int    // 0 = all, 1 = this workspace only, 2 = other locations only
+	// workspaceScoped locks the browser to the current workspace: single-session
+	// embedders (nil SessionSpawner) run one working dir per process, so
+	// cross-dir sessions are never loadable and are hidden. It forces
+	// workspaceFilter to 1 and disables the Ctrl+G toggle. See WithWorkspaceScoped.
+	workspaceScoped bool
 	rows            []browserRow
 	rowForSession   []int // filtered index -> row index
 	workspaceCount  int
@@ -139,10 +144,21 @@ type sessionBrowserDialog struct {
 	lastClickIndex int
 }
 
+// SessionBrowserOption customizes the session browser dialog.
+type SessionBrowserOption func(*sessionBrowserDialog)
+
+// WithWorkspaceScoped locks the browser to the current workspace: it shows only
+// sessions started in workspaceDir and disables the workspace toggle. Used by
+// single-session embedders (nil SessionSpawner) that run one working directory
+// per process, so sessions from other directories are never loadable here.
+func WithWorkspaceScoped() SessionBrowserOption {
+	return func(d *sessionBrowserDialog) { d.workspaceScoped = true }
+}
+
 // NewSessionBrowserDialog creates a new session browser dialog.
 // workspaceDir is the directory of the active session; sessions started
 // there are grouped first and can be filtered with the workspace filter.
-func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Dialog {
+func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string, opts ...SessionBrowserOption) Dialog {
 	ti := textinput.New()
 	ti.Placeholder = "Type to search sessions…"
 	ti.Focus()
@@ -179,6 +195,13 @@ func NewSessionBrowserDialog(sessions []session.Summary, workspaceDir string) Di
 			Delete:          key.NewBinding(key.WithKeys("ctrl+d")),
 		},
 		openedAt: time.Now(),
+	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	// A workspace-scoped browser opens locked to this-workspace-only.
+	if d.workspaceScoped && d.workspace.enabled() {
+		d.workspaceFilter = 1
 	}
 	// Initialize filtered list
 	d.filterSessions()
@@ -283,7 +306,8 @@ func (d *sessionBrowserDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, nil
 
 		case key.Matches(msg, d.keyMap.FilterWorkspace):
-			if d.workspace.enabled() {
+			// Locked to the current workspace: no toggling to other locations.
+			if d.workspace.enabled() && !d.workspaceScoped {
 				d.workspaceFilter = (d.workspaceFilter + 1) % 3
 				d.filterSessions()
 			}
@@ -511,11 +535,15 @@ func (d *sessionBrowserDialog) View() string {
 	case 2:
 		title += " " + styles.UnstarredStyle.Render("☆")
 	}
-	switch d.workspaceFilter {
-	case 1:
-		title += " " + styles.StarredStyle.Render("⌂")
-	case 2:
-		title += " " + styles.UnstarredStyle.Render("⌂")
+	// The workspace filter indicator is a toggle affordance; a scoped browser is
+	// permanently this-workspace-only, so it shows no indicator.
+	if !d.workspaceScoped {
+		switch d.workspaceFilter {
+		case 1:
+			title += " " + styles.StarredStyle.Render("⌂")
+		case 2:
+			title += " " + styles.UnstarredStyle.Render("⌂")
+		}
 	}
 
 	var filterDesc string
@@ -534,7 +562,7 @@ func (d *sessionBrowserDialog) View() string {
 	}
 
 	secondHelpLine := []string{"enter", "load"}
-	if d.workspace.enabled() {
+	if d.workspace.enabled() && !d.workspaceScoped {
 		var workspaceDesc string
 		switch d.workspaceFilter {
 		case 0:

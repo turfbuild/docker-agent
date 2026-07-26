@@ -424,6 +424,30 @@ func TestSessionBrowserWorkspaceFilterCycle(t *testing.T) {
 	require.Len(t, d.filtered, 4)
 }
 
+func TestSessionBrowserWorkspaceScoped(t *testing.T) {
+	t.Parallel()
+	dialog := NewSessionBrowserDialog(workspaceTestSessions(), "/work/project", WithWorkspaceScoped())
+	d := dialog.(*sessionBrowserDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+
+	// Scoped: opens locked to this-workspace-only, so only current-dir sessions
+	// show and there are no group headers.
+	require.True(t, d.workspaceScoped)
+	require.Equal(t, 1, d.workspaceFilter)
+	require.Equal(t, []string{"here-1", "here-2"}, filteredIDs(d))
+	for _, row := range d.rows {
+		require.Empty(t, row.header)
+	}
+
+	// Ctrl+G is a no-op when scoped — it cannot reveal other locations.
+	ctrlG := tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl}
+	updated, _ := d.Update(ctrlG)
+	d = updated.(*sessionBrowserDialog)
+	require.Equal(t, 1, d.workspaceFilter, "scoped browser must stay this-workspace-only")
+	require.Equal(t, []string{"here-1", "here-2"}, filteredIDs(d))
+}
+
 func TestSessionBrowserWorkspaceFilterNoopWithoutWorkspace(t *testing.T) {
 	t.Parallel()
 	dialog := NewSessionBrowserDialog(workspaceTestSessions(), "")

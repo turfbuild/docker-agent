@@ -1312,8 +1312,16 @@ func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 		workspaceDir, _ = os.Getwd()
 	}
 
+	var opts []dialog.SessionBrowserOption
+	if m.supervisor.Spawner() == nil {
+		// Single-session embedders run one working directory per process, so
+		// sessions from other dirs can't be loaded here — scope the browser to
+		// the current workspace and hide them (rather than list-then-decline).
+		opts = append(opts, dialog.WithWorkspaceScoped())
+	}
+
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSessionBrowserDialog(sessions, workspaceDir),
+		Model: dialog.NewSessionBrowserDialog(sessions, workspaceDir, opts...),
 	})
 }
 
@@ -1422,7 +1430,12 @@ func (m *appModel) replaceActiveSession(ctx context.Context, sess *session.Sessi
 	// we need a fresh runtime whose tools operate in the correct directory.
 	runner := m.supervisor.GetRunner(activeID)
 	sessWorkingDir := sess.WorkingDir
-	if sessWorkingDir != "" && runner != nil && sessWorkingDir != runner.WorkingDir {
+	// The respawn re-roots tools into the session's dir via the spawner; guard on
+	// a non-nil spawner so a single-session embedder never calls a nil
+	// Spawner() here. Without one we keep the existing runner (its working dir) —
+	// the browser path already redirects cross-dir loads (see handleLoadSession),
+	// so this only backstops the internal restore callers.
+	if sessWorkingDir != "" && runner != nil && sessWorkingDir != runner.WorkingDir && m.supervisor.Spawner() != nil {
 		newApp, _, spawnCleanup, err := m.supervisor.Spawner()(ctx, sessWorkingDir)
 		if err == nil {
 			slog.DebugContext(ctx, "Respawning runtime for working dir mismatch",
