@@ -7,9 +7,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
+	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
 func TestKeyboardEnhancementsInvalidateStatusBarHelp(t *testing.T) {
@@ -318,6 +321,71 @@ func TestCommandCategories_DisabledCommandsFilter(t *testing.T) {
 		}
 		if len(got[0].Commands) != 1 || got[0].Commands[0].SlashCommand != "/exit" {
 			t.Fatalf("session commands = %+v, want only /exit", got[0].Commands)
+		}
+	})
+}
+
+// TestDisableTabCommandsSuppressesTabCommands verifies the single-session
+// (nil-spawner) auto-suppression: the tab-only commands (/new, /fork) — which
+// only spawn or fork into a tab — are dropped from the command
+// palette/parser/completion when there is no spawner, and kept when there is one.
+func TestDisableTabCommandsSuppressesTabCommands(t *testing.T) {
+	t.Parallel()
+
+	build := func(context.Context, tea.Model) []commands.Category {
+		return []commands.Category{{
+			Name: "Session",
+			Commands: []commands.Item{
+				{ID: "n", SlashCommand: "/new"},
+				{ID: "f", SlashCommand: "/fork"},
+				{ID: "x", SlashCommand: "/exit"},
+			},
+		}}
+	}
+	has := func(cats []commands.Category, slash string) bool {
+		for _, c := range cats {
+			for _, it := range c.Commands {
+				if it.SlashCommand == slash {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	t.Run("nil spawner suppresses tab commands", func(t *testing.T) {
+		t.Parallel()
+		m := &appModel{ctx: t.Context, buildCommandCategories: build, supervisor: supervisor.New(nil)}
+		if m.tabsEnabled() {
+			t.Fatal("precondition: a nil spawner should leave tabs disabled")
+		}
+		m.disableTabCommands()
+		cats := m.commandCategories()
+		for _, slash := range tabOnlySlashCommands {
+			if has(cats, slash) {
+				t.Errorf("%s present in the palette with a nil spawner; want it suppressed", slash)
+			}
+		}
+		if !has(cats, "/exit") {
+			t.Error("/exit suppressed with a nil spawner; only tab commands should be dropped")
+		}
+	})
+
+	t.Run("spawner present keeps tab commands", func(t *testing.T) {
+		t.Parallel()
+		spawner := func(context.Context, string) (*app.App, *session.Session, func(), error) {
+			return nil, nil, nil, nil
+		}
+		m := &appModel{ctx: t.Context, buildCommandCategories: build, supervisor: supervisor.New(spawner)}
+		if !m.tabsEnabled() {
+			t.Fatal("precondition: a non-nil spawner should enable tabs")
+		}
+		m.disableTabCommands()
+		cats := m.commandCategories()
+		for _, slash := range tabOnlySlashCommands {
+			if !has(cats, slash) {
+				t.Errorf("%s missing from the palette with a spawner present; want it kept", slash)
+			}
 		}
 	})
 }

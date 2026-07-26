@@ -448,6 +448,12 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		opt(m)
 	}
 
+	// Single-session embedders pass a nil spawner, so /new can never spawn a tab
+	// here — suppress it (see disableTabCommands). Runs after the
+	// options loop so a caller's WithDisabledCommands is merged not clobbered, and
+	// before the editor/chat below consume commandCategories().
+	m.disableTabCommands()
+
 	// Create initial editor (after options are applied so command builder is set)
 	initialEditor := editor.New(historyStore, m.editorOpts()...)
 	m.editors[sessID] = initialEditor
@@ -470,7 +476,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Initialize tab bar with current tabs
 	tabs, activeIdx := sv.GetTabs()
 	tb.SetTabs(tabs, activeIdx)
-	m.statusBar.SetShowNewTab(tb.Height() == 0)
+	m.statusBar.SetShowNewTab(tb.Height() == 0 && m.tabsEnabled())
 
 	return m
 }
@@ -728,7 +734,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.TabsUpdatedMsg:
 		prevHeight := m.tabBar.Height()
 		m.tabBar.SetTabs(msg.Tabs, msg.ActiveIdx)
-		m.statusBar.SetShowNewTab(m.tabBar.Height() == 0)
+		m.statusBar.SetShowNewTab(m.tabBar.Height() == 0 && m.tabsEnabled())
 		if m.tabBar.Height() != prevHeight {
 			cmd := m.resizeAll()
 			return m, cmd
@@ -957,7 +963,11 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- New session (slash command /new) ---
 
 	case messages.NewSessionMsg:
-		// /new spawns a new tab when a session spawner is configured.
+		// /new spawns a new tab when a session spawner is configured. Without one
+		// (single-session embedders) there are no tabs, so ignore it.
+		if !m.tabsEnabled() {
+			return m, nil
+		}
 		return m.handleSpawnSession("")
 
 	case messages.ClearSessionMsg:
@@ -1017,6 +1027,11 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleBranchFromEdit(msg)
 
 	case messages.ForkSessionMsg:
+		// /fork forks the current session into a new tab. Without a spawner
+		// (single-session embedders) there are no tabs, so ignore it.
+		if !m.tabsEnabled() {
+			return m, nil
+		}
 		return m.handleForkSession()
 
 	// --- Session commands (slash commands, command palette) ---
@@ -1925,6 +1940,40 @@ func (m *appModel) Help() help.KeyMap {
 	return core.NewSimpleHelp(m.Bindings())
 }
 
+// tabsEnabled reports whether multi-tab session management is available. It is
+// false for single-session embedders that construct the TUI without a
+// SessionSpawner: with no spawner there is nothing to spawn into, so every
+// tab affordance — the "+ new tab" button, the Ctrl+t/w/p/n keybindings and
+// their help entries — is suppressed rather than left to fail with "session
+// spawning is not available". Loading a session from the browser still works
+// (handleLoadSession replaces in-place when there is no spawner).
+func (m *appModel) tabsEnabled() bool {
+	return m.supervisor != nil && m.supervisor.Spawner() != nil
+}
+
+// tabOnlySlashCommands are the slash commands that only make sense with tabs
+// (they spawn or fork a session into a new tab). disableTabCommands hides them
+// for single-session embedders.
+var tabOnlySlashCommands = []string{"/new", "/fork"}
+
+// disableTabCommands suppresses tab-only slash commands (see
+// tabOnlySlashCommands) for single-session embedders with no spawner. It reuses
+// the WithDisabledCommands map so the commandCategories choke point drops them
+// from the palette, the slash-command parser, and completion in one place.
+// No-op when tabs are enabled. It merges into any existing disabledCommands
+// rather than replacing, so a caller's WithDisabledCommands is preserved.
+func (m *appModel) disableTabCommands() {
+	if m.tabsEnabled() {
+		return
+	}
+	if m.disabledCommands == nil {
+		m.disabledCommands = make(map[string]bool, len(tabOnlySlashCommands))
+	}
+	for _, c := range tabOnlySlashCommands {
+		m.disabledCommands[c] = true
+	}
+}
+
 // AllBindings returns ALL available key bindings for the help dialog (comprehensive list).
 func (m *appModel) AllBindings() []key.Binding {
 	keys := core.GetKeys()
@@ -1937,7 +1986,9 @@ func (m *appModel) AllBindings() []key.Binding {
 	tabBinding := keys.SwitchFocus
 
 	bindings := []key.Binding{quitBinding, tabBinding}
-	bindings = append(bindings, m.tabBar.Bindings()...)
+	if m.tabsEnabled() {
+		bindings = append(bindings, m.tabBar.Bindings()...)
+	}
 
 	// Additional global shortcuts. shift+tab is not user-configurable.
 	bindings = append(bindings,
@@ -2070,7 +2121,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// pending elicitations) which let tab-navigation keys keep working so
 	// the user can switch to another conversation while the prompt waits.
 	if m.dialogMgr.Open() {
-		if m.dialogMgr.TopIsBackground() && !m.leanMode && !m.editor.IsHistorySearchActive() {
+		if m.dialogMgr.TopIsBackground() && !m.leanMode && !m.editor.IsHistorySearchActive() && m.tabsEnabled() {
 			m.tabBar.SetCloseTabEnabled(true)
 			if cmd := m.tabBar.Update(msg); cmd != nil {
 				return m, cmd
@@ -2083,7 +2134,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// history search so that ctrl+n/ctrl+p cycle through matches instead.
 	// Ctrl+w (close tab) is disabled when the editor is focused so that the
 	// standard "delete word" shortcut works while typing.
-	if !m.leanMode && !m.editor.IsHistorySearchActive() {
+	if !m.leanMode && !m.editor.IsHistorySearchActive() && m.tabsEnabled() {
 		m.tabBar.SetCloseTabEnabled(m.focusedPanel != PanelEditor)
 		if cmd := m.tabBar.Update(msg); cmd != nil {
 			return m, cmd
