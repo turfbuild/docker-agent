@@ -67,6 +67,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 			Tool: toolDef.Name,
 			View: *ui.NewToolView(e.GetAgentName(), e.ToolCall, toolDef, tuitypes.ToolStatusConfirmation),
 		}
+	case *runtime.ElicitationRequestEvent:
+		m.handleElicitationRequest(ctx, e)
 	case *runtime.TokenUsageEvent:
 		m.setTokenUsage(e.SessionID, e.Usage)
 	case *runtime.AgentInfoEvent:
@@ -101,6 +103,55 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.ModelFallbackEvent:
 		m.addNotice("⚠ ", "Model "+e.FailedModel+" failed, falling back to "+e.FallbackModel+".", ui.StWarning())
 	}
+}
+
+// handleElicitationRequest surfaces an MCP elicitation (e.g. cagent's built-in
+// user_prompt tool, which agents call to ask for confirmation before a gated
+// action). The lean TUI has no dialog surface, so it treats a form elicitation
+// as a compact yes/no confirmation: the message is written to the transcript
+// (so long prompt text scrolls with history) and a prompt collects the answer
+// (see ui.ElicitModel). OAuth and URL-mode elicitations need a browser flow
+// lean mode has no way to drive, so they are declined immediately rather than
+// left hanging. The discrimination mirrors the full TUI's handleElicitationRequest.
+func (m *model) handleElicitationRequest(ctx context.Context, e *runtime.ElicitationRequestEvent) {
+	if isOAuthElicitation(e.Meta) || e.Mode == "url" {
+		m.addNotice("⚠ ", "Skipping unsupported prompt in lean mode.", ui.StWarning())
+		_ = m.app.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil, e.ElicitationID)
+		return
+	}
+
+	m.screen.Transcript.FlushPending()
+	if e.Message != "" {
+		m.addNotice("", e.Message, ui.StAccent())
+	}
+	m.screen.Elicit = &ui.ElicitModel{
+		Title:         elicitationTitle(e.Meta),
+		ElicitationID: e.ElicitationID,
+	}
+}
+
+// isOAuthElicitation reports whether an elicitation carries the OAuth-flow meta
+// marker, matching the full TUI's detection (Meta["docker-agent/type"] ==
+// "oauth_flow"). Guards against a nil Meta map.
+func isOAuthElicitation(meta map[string]any) bool {
+	if meta == nil {
+		return false
+	}
+	t, ok := meta["docker-agent/type"].(string)
+	return ok && t == "oauth_flow"
+}
+
+// elicitationTitle reads the dialog title an elicitation may carry in its meta,
+// matching cagent's user_prompt convention (key "cagent/title"), and defaults
+// to "Question" as the full TUI does.
+func elicitationTitle(meta map[string]any) string {
+	if meta == nil {
+		return "Question"
+	}
+	if t, ok := meta["cagent/title"].(string); ok && t != "" {
+		return t
+	}
+	return "Question"
 }
 
 func (m *model) handleUserMessageEvent(e *runtime.UserMessageEvent) {
