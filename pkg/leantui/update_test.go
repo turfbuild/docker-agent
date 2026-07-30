@@ -30,6 +30,11 @@ type cycleThinkingRuntime struct {
 	models     []runtime.ModelChoice
 	modelRef   string
 	modelErr   error
+
+	elicitCalls   int
+	elicitAction  tools.ElicitationAction
+	elicitContent map[string]any
+	elicitIDs     []string
 }
 
 func (r *cycleThinkingRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
@@ -59,7 +64,11 @@ func (r *cycleThinkingRuntime) Run(context.Context, *session.Session) ([]session
 	return nil, nil
 }
 func (r *cycleThinkingRuntime) Resume(context.Context, runtime.ResumeRequest) {}
-func (r *cycleThinkingRuntime) ResumeElicitation(context.Context, tools.ElicitationAction, map[string]any, ...string) error {
+func (r *cycleThinkingRuntime) ResumeElicitation(_ context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error {
+	r.elicitCalls++
+	r.elicitAction = action
+	r.elicitContent = content
+	r.elicitIDs = elicitationID
 	return nil
 }
 func (r *cycleThinkingRuntime) SessionStore() session.Store { return nil }
@@ -185,6 +194,84 @@ func TestEffortCommandRejectsUnknownLevel(t *testing.T) {
 	assert.Zero(t, rt.setCalls)
 	assert.Empty(t, m.status.Thinking)
 	assert.Equal(t, 1, m.screen.Transcript.BlockCount())
+}
+
+func TestFormElicitationResolvesAsYesNo(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	m.handleEvent(t.Context(), &runtime.ElicitationRequestEvent{
+		Message:       "Approve the plan?",
+		Mode:          "form",
+		ElicitationID: "elic-1",
+		Meta:          map[string]any{"cagent/title": "Plan approval"},
+	})
+
+	// The prompt surfaces: message written to the transcript, ElicitModel armed.
+	if assert.NotNil(t, m.screen.Elicit) {
+		assert.Equal(t, "Plan approval", m.screen.Elicit.Title)
+		assert.Equal(t, "elic-1", m.screen.Elicit.ElicitationID)
+	}
+	assert.Equal(t, 1, m.screen.Transcript.BlockCount())
+	assert.Zero(t, rt.elicitCalls)
+
+	// 'y' accepts, keyed by the elicitation ID, carrying a minimal payload.
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune{'y'}})
+
+	assert.Nil(t, m.screen.Elicit)
+	assert.Equal(t, 1, rt.elicitCalls)
+	assert.Equal(t, tools.ElicitationActionAccept, rt.elicitAction)
+	assert.Equal(t, []string{"elic-1"}, rt.elicitIDs)
+	assert.Equal(t, map[string]any{"response": "yes"}, rt.elicitContent)
+}
+
+func TestFormElicitationDeclineSendsNoContent(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	m.handleEvent(t.Context(), &runtime.ElicitationRequestEvent{Message: "ok?", Mode: "form", ElicitationID: "e2"})
+	m.handleKey(t.Context(), ui.Key{Typ: ui.KeyRune, Runes: []rune{'n'}})
+
+	assert.Nil(t, m.screen.Elicit)
+	assert.Equal(t, tools.ElicitationActionDecline, rt.elicitAction)
+	assert.Nil(t, rt.elicitContent)
+}
+
+func TestURLElicitationDeclinedImmediately(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	// URL-mode elicitations need a browser flow lean mode can't drive: decline
+	// on arrival rather than arm a prompt that can't be answered meaningfully.
+	m.handleEvent(t.Context(), &runtime.ElicitationRequestEvent{Message: "visit", Mode: "url", URL: "https://example.test", ElicitationID: "e3"})
+
+	assert.Nil(t, m.screen.Elicit)
+	assert.Equal(t, 1, rt.elicitCalls)
+	assert.Equal(t, tools.ElicitationActionDecline, rt.elicitAction)
+}
+
+func TestOAuthElicitationDeclinedImmediately(t *testing.T) {
+	t.Parallel()
+	rt := &cycleThinkingRuntime{}
+	m := bareModel(24)
+	m.app = app.New(t.Context(), rt, session.New())
+
+	m.handleEvent(t.Context(), &runtime.ElicitationRequestEvent{
+		Message:       "authorize",
+		Mode:          "form",
+		ElicitationID: "e4",
+		Meta:          map[string]any{"docker-agent/type": "oauth_flow"},
+	})
+
+	assert.Nil(t, m.screen.Elicit)
+	assert.Equal(t, 1, rt.elicitCalls)
+	assert.Equal(t, tools.ElicitationActionDecline, rt.elicitAction)
 }
 
 func TestModelCommandSwitchesModel(t *testing.T) {

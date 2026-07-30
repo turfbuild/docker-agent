@@ -13,10 +13,15 @@ import (
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/modelpicker"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 func (m *model) handleKey(ctx context.Context, k ui.Key) {
+	if m.screen.Elicit != nil {
+		m.handleElicitKey(ctx, k)
+		return
+	}
 	if m.screen.Confirm != nil {
 		m.handleConfirmKey(k)
 		return
@@ -454,6 +459,33 @@ func (m *model) handleConfirmKey(k ui.Key) {
 func (m *model) resolveConfirm(req runtime.ResumeRequest) {
 	m.app.Resume(req)
 	m.screen.Confirm = nil
+}
+
+// handleElicitKey answers a pending elicitation prompt as a yes/no. Consumers
+// commonly gate on the response Action, not its content shape, so accept carries
+// a minimal affirmative payload; decline and cancel send no content.
+func (m *model) handleElicitKey(ctx context.Context, k ui.Key) {
+	switch {
+	case k.Typ == ui.KeyEnter:
+		m.resolveElicit(ctx, tools.ElicitationActionAccept, map[string]any{"response": "yes"})
+	case k.Typ == ui.KeyEsc:
+		m.resolveElicit(ctx, tools.ElicitationActionCancel, nil)
+	case k.Typ == ui.KeyRune && len(k.Runes) > 0:
+		switch k.Runes[0] {
+		case 'y', 'Y':
+			m.resolveElicit(ctx, tools.ElicitationActionAccept, map[string]any{"response": "yes"})
+		case 'n', 'N':
+			m.resolveElicit(ctx, tools.ElicitationActionDecline, nil)
+		}
+	}
+}
+
+func (m *model) resolveElicit(ctx context.Context, action tools.ElicitationAction, content map[string]any) {
+	id := m.screen.Elicit.ElicitationID
+	if err := m.app.ResumeElicitation(ctx, action, content, id); err != nil {
+		m.addNotice("✗ ", fmt.Sprintf("Failed to answer prompt: %v", err), ui.StError())
+	}
+	m.screen.Elicit = nil
 }
 
 func (m *model) resetConversation() {
