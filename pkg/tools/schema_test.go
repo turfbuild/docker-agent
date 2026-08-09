@@ -227,3 +227,48 @@ func TestSchemaToMap_StripsNullFromRequiredArrayTypes(t *testing.T) {
 		"required": []any{"paths"},
 	}, m)
 }
+
+// TestSchemaToMap_FlattensOptional guards the fix for MCP servers that declare
+// optional params as the Optional[T] shape, anyOf:[{type:T},{type:null}]. Before
+// the fix such a property had no top-level "type", so ensurePropertyTypes
+// stamped it "object"; the object+anyOf schema made models emit unquoted string
+// values ({"filter_key":region}) that failed json.Unmarshal in the MCP toolset.
+// It must collapse to a plain {type:T}.
+func TestSchemaToMap_FlattensOptional(t *testing.T) {
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"filter_key": map[string]any{
+				"anyOf":   []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}},
+				"default": nil,
+				"title":   "Filter Key",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	filterKey := m["properties"].(map[string]any)["filter_key"].(map[string]any)
+	assert.Equal(t, "string", filterKey["type"], "Optional[str] should collapse to a plain string type")
+	assert.NotContains(t, filterKey, "anyOf", "the anyOf compositor should be removed")
+	assert.Nil(t, filterKey["default"], "existing keys (default) survive the flatten")
+	assert.Equal(t, "Filter Key", filterKey["title"])
+}
+
+// TestSchemaToMap_PreservesRealUnions ensures a genuine multi-type union is left
+// intact and is NOT stamped "object" — only the single-non-null-branch Optional
+// shape is collapsed.
+func TestSchemaToMap_PreservesRealUnions(t *testing.T) {
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"value": map[string]any{
+				"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "integer"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	value := m["properties"].(map[string]any)["value"].(map[string]any)
+	assert.Contains(t, value, "anyOf", "a real union keeps its anyOf")
+	assert.NotEqual(t, "object", value["type"], "a real union must not be stamped object")
+}
